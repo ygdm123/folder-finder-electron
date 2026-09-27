@@ -1,0 +1,15 @@
+{
+  "name": "folder-finder",
+  "version": "1.0.0",
+  "description": "快速找文件夹：设定母文件夹 → 拼音排列子文件夹 → 单击访达打开",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "pinyin-pro": "^3.26.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

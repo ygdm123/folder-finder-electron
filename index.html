@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>快速找文件夹</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; }
+    body { font: 13px -apple-system, "PingFang SC", sans-serif; color: #1d1d1f; background: #f5f5f7; height: 100vh; display: flex; flex-direction: column; user-select: none; }
+    header { background: #fff; border-bottom: 1px solid #e0e0e2; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
+    .toolbar { display: flex; align-items: center; gap: 6px; }
+    button { padding: 5px 10px; border: none; border-radius: 7px; background: #0a84ff; color: #fff; font-size: 12px; cursor: pointer; white-space: nowrap; }
+    button:hover { background: #0071e3; }
+    button.ghost { background: #e8e8ed; color: #1d1d1f; }
+    button.ghost:hover { background: #dcdce1; }
+    /* 当前母文件夹路径：空间不足时左侧被裁掉，保留尾部 */
+    #dir { flex: 1; min-width: 0; color: #86868b; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
+    #search { flex: 1; min-width: 0; padding: 5px 9px; border: 1px solid #d2d2d7; border-radius: 7px; font-size: 13px; outline: none; }
+    #search:focus { border-color: #0a84ff; }
+    #count { color: #86868b; font-size: 12px; white-space: nowrap; }
+    main { flex: 1; overflow-y: auto; outline: none; }
+    .letter { position: sticky; top: 0; z-index: 1; padding: 3px 12px; font-size: 11px; font-weight: 700; color: #0a84ff; background: #f5f5f7; border-bottom: 1px solid #e8e8ed; }
+    .row { display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 22px; cursor: pointer; background: #fff; }
+    .row:hover { background: #eef4ff; }
+    .row.sel, .row.sel:hover { background: #d8e7ff; }
+    /* 拖入悬停高亮：整行蓝框，松手前能看清要放进哪个文件夹 */
+    .row.drop, .row.drop:hover { background: #e0edff; outline: 2px solid #0a84ff; outline-offset: -2px; }
+    .row .icon { font-size: 14px; }
+    .row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* 长条面板空间宝贵：拼音串平时隐藏，悬停该行才出现 */
+    .row .py { display: none; color: #b0b0b5; font-size: 11px; }
+    .row:hover .py { display: inline; }
+    .empty { color: #86868b; text-align: center; margin-top: 60px; line-height: 2.1; padding: 0 16px; }
+    /* 拖拽结果提示条 */
+    #toast { position: fixed; z-index: 8; left: 50%; bottom: 24px; transform: translateX(-50%); background: rgba(29,29,31,.92); color: #fff; padding: 8px 16px; border-radius: 9px; font-size: 12px; opacity: 0; pointer-events: none; transition: opacity .25s; max-width: 86%; }
+    #toast.show { opacity: 1; }
+    #toast b { color: #6ec1ff; font-weight: 600; }
+    /* 右键菜单 */
+    #menu { position: fixed; z-index: 9; display: none; background: #fff; border: 1px solid #d2d2d7; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.15); padding: 4px; min-width: 210px; }
+    #menu.show { display: block; }
+    #menu div { padding: 6px 12px; border-radius: 5px; cursor: pointer; font-size: 13px; }
+    #menu div:hover { background: #e8f0fe; }
+    #menu kbd { float: right; color: #a1a1a6; font-size: 11px; font-family: inherit; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="toolbar">
+      <button id="choose">设定母文件夹…</button>
+      <span id="dir">（未设定母文件夹）</span>
+    </div>
+    <div class="toolbar">
+      <input id="search" placeholder="筛选：中文 / 拼音 (⌘F)" />
+      <span id="count"></span>
+    </div>
+  </header>
+  <main id="list" tabindex="0"><div class="empty">点击上方「设定母文件夹…」<br>子文件夹按拼音首字母 A–Z 分组列出<br>单击 / 双击：在访达中打开<br>把文件拖到某行上：移入该文件夹</div></main>
+  <div id="menu">
+    <div data-act="open">在访达中打开 <kbd>⏎</kbd></div>
+    <div data-act="reveal">在访达中定位</div>
+    <div data-act="copy">复制路径</div>
+  </div>
+  <div id="toast"></div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let dir = "";
+    let selPath = null;    // 当前选中的文件夹路径
+    let menuPath = null;   // 右键菜单目标
+    let timer = null;      // 搜索防抖
+    let clickTimer = null; // 单击延迟：等 260ms 判断是否双击，避免弹出两个访达窗口
+    let toastTimer = null;
+
+    /* ---------- 提示条 ---------- */
+    function toast(html) {
+      const t = $("toast");
+      t.innerHTML = html;
+      t.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+    }
+
+    /* ---------- 列表 ---------- */
+    async function refresh() {
+      if (!dir) return;
+      const r = await window.api.list(dir, $("search").value);
+      $("dir").textContent = dir;
+      const list = $("list");
+      list.textContent = ""; // 清空并重建，动态内容全部走 DOM API，杜绝路径注入
+      $("count").textContent = r.ok ? `${r.items.length} 个` : "";
+      if (!r.ok) {
+        const d = document.createElement("div");
+        d.className = "empty";
+        d.textContent = "读取失败：" + r.error;
+        list.appendChild(d);
+        return;
+      }
+      if (!r.items.length) {
+        const d = document.createElement("div");
+        d.className = "empty";
+        d.textContent = "没有匹配的文件夹";
+        list.appendChild(d);
+        return;
+      }
+      let lastGroup = null;
+      for (const it of r.items) {
+        if (it.group !== lastGroup) {
+          const h = document.createElement("div");
+          h.className = "letter";
+          h.textContent = it.group;
+          list.appendChild(h);
+          lastGroup = it.group;
+        }
+        const row = document.createElement("div");
+        row.className = "row";
+        row.dataset.path = it.path;
+        if (it.path === selPath) row.classList.add("sel");
+
+        const icon = document.createElement("span");
+        icon.className = "icon";
+        icon.textContent = "📁";
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = it.name; // textContent 天然防注入
+        name.title = it.name;
+        const py = document.createElement("span");
+        py.className = "py";
+        py.textContent = it.py;
+
+        row.append(icon, name, py);
+        // 单击 / 双击都在访达打开；单击延迟 260ms，双击取消之，保证只弹一个窗口
+        row.onclick = () => {
+          select(row);
+          clearTimeout(clickTimer);
+          clickTimer = setTimeout(() => window.api.open(it.path), 260);
+        };
+        row.ondblclick = () => {
+          clearTimeout(clickTimer);
+          window.api.open(it.path);
+        };
+        row.oncontextmenu = (e) => { e.preventDefault(); select(row); showMenu(e.clientX, e.clientY, it.path); };
+        list.appendChild(row);
+      }
+    }
+
+    /* ---------- 拖拽移入：把外部文件移到某行对应的文件夹 ---------- */
+
+    // 全局阻止默认拖放，防止 Electron 直接打开拖入的文件
+    window.addEventListener("dragover", (e) => e.preventDefault());
+    window.addEventListener("drop", (e) => e.preventDefault());
+
+    function clearDrop() {
+      document.querySelectorAll(".row.drop").forEach((r) => r.classList.remove("drop"));
+    }
+
+    $("list").addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const row = e.target.closest(".row");
+      clearDrop();
+      if (row) row.classList.add("drop");
+    });
+    $("list").addEventListener("dragleave", (e) => {
+      if (!e.relatedTarget || !$("list").contains(e.relatedTarget)) clearDrop();
+    });
+    $("list").addEventListener("drop", async (e) => {
+      e.preventDefault();
+      const row = e.target.closest(".row");
+      clearDrop();
+      if (!row) return; // 空白处松手：忽略
+      const files = [...e.dataTransfer.files];
+      if (!files.length) return;
+      const srcs = files.map((f) => window.api.pathForFile(f)).filter(Boolean);
+      if (!srcs.length) return;
+      const r = await window.api.moveFiles(srcs, row.dataset.path);
+      const name = row.querySelector(".name").textContent;
+      const parts = [];
+      if (r.moved) parts.push(`移入 ${r.moved} 个`);
+      if (r.replaced) parts.push(`替换 ${r.replaced} 个`);
+      if (r.keptBoth) parts.push(`保留两者 ${r.keptBoth} 个`);
+      if (r.skipped) parts.push(`跳过 ${r.skipped} 个`);
+      if (r.failed.length) parts.push(`失败：${r.failed.join("、")}`);
+      toast(`已移动到 <b>「${name}」</b> · ${parts.join("，") || "无变化"}`);
+    });
+
+    /* ---------- 选中与键盘 ---------- */
+    const rows = () => [...document.querySelectorAll("#list .row")];
+
+    function select(row) {
+      rows().forEach((r) => r.classList.remove("sel"));
+      if (row) {
+        row.classList.add("sel");
+        row.scrollIntoView({ block: "nearest" });
+        selPath = row.dataset.path;
+      } else {
+        selPath = null;
+      }
+    }
+
+    document.addEventListener("keydown", (e) => {
+      const menu = $("menu");
+      if (e.key === "Escape") {
+        if (menu.classList.contains("show")) { menu.classList.remove("show"); return; }
+        if ($("search").value) { $("search").value = ""; refresh(); }
+        else select(null);
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        $("search").focus();
+        $("search").select();
+        return;
+      }
+      if (e.target === $("search")) return; // 搜索框里 ↑↓ 不抢焦点
+
+      const rs = rows();
+      const i = rs.findIndex((r) => r.dataset.path === selPath);
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const n = e.key === "ArrowDown" ? Math.min(i + 1, rs.length - 1) : i < 0 ? 0 : Math.max(i - 1, 0);
+        if (rs[n]) select(rs[n]);
+      } else if (e.key === "Enter" && selPath) {
+        e.preventDefault();
+        window.api.open(selPath); // ⏎ 访达打开
+      }
+    });
+
+    /* ---------- 右键菜单 ---------- */
+    function showMenu(x, y, p) {
+      menuPath = p;
+      const m = $("menu");
+      m.style.left = Math.min(x, innerWidth - 226) + "px";
+      m.style.top = Math.min(y, innerHeight - 150) + "px";
+      m.classList.add("show");
+    }
+    $("menu").addEventListener("click", (e) => {
+      const act = e.target.dataset.act;
+      $("menu").classList.remove("show");
+      if (!act || !menuPath) return;
+      if (act === "open") window.api.open(menuPath);
+      if (act === "reveal") window.api.reveal(menuPath);
+      if (act === "copy") navigator.clipboard.writeText(menuPath);
+    });
+    window.addEventListener("click", () => $("menu").classList.remove("show"));
+    window.addEventListener("blur", () => $("menu").classList.remove("show"));
+
+    /* ---------- 顶部控件 ---------- */
+    $("choose").onclick = async () => {
+      const d = await window.api.chooseDir();
+      if (d) { dir = d; selPath = null; $("search").value = ""; refresh(); }
+    };
+    $("search").oninput = () => { clearTimeout(timer); timer = setTimeout(refresh, 150); };
+
+    window.api.onInit((d) => { if (d) { dir = d; refresh(); } });
+  </script>
+</body>
+</html>
